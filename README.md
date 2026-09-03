@@ -92,6 +92,13 @@ pip install .
 
 Or run from a checkout: `python -m shpreflight check "ls -la"`.
 
+Ports: the same checker ships as a Go binary (`cmd/shpreflight`,
+`scripts/build_matrix.py` cross-compiles 9 OS/arch targets), a C99
+single file (`c/`), and a Rust crate (`rs/`). All five implementations
+share one danger table, generated from `shpreflight/danger.py` by
+`proofs/export_patterns.py` into Lean/Go/C/Rust sources — regenerate
+after any table edit so no port drifts.
+
 ## Usage
 
 ```
@@ -144,9 +151,18 @@ targets); it is a tripwire, not a policy engine.
 ## Verify everything
 
 ```console
-python -m pytest tests -q                                # 50 tests
+python -m pytest tests -q                                # 55 tests
+python -m pytest tests/diff_impls.py -v                  # Python vs Go vs C vs Rust CLI parity
+go test ./...                                             # Go port
+gcc -O2 -std=c99 -DSHPREFLIGHT_NO_MAIN -o c/test_shpreflight.exe c/test_shpreflight.c && c/test_shpreflight.exe   # C port, 455 checks
+cargo test --manifest-path rs/Cargo.toml                 # Rust port, 64 tests
 powershell -ExecutionPolicy Bypass -File proofs\verify_proofs.ps1
 ```
+
+Note for building the Rust port on Windows with the GNU toolchain: if
+the system MinGW lacks `libgcc_eh`, pass
+`$env:RUSTFLAGS = "-C link-self-contained=yes"` — the toolchain ships
+the required link libraries itself.
 
 ## License
 
