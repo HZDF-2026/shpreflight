@@ -1,0 +1,713 @@
+/*
+ * test_shpreflight.cpp — embedded unit tests for the C++ port.
+ *
+ * Build & run (single translation unit, includes the implementation):
+ *   c++ -O2 -std=c++17 -Wall -Wextra -DSHPREFLIGHT_NO_MAIN -o test_shpreflight test_shpreflight.cpp
+ *   ./test_shpreflight
+ *
+ * Exit code: 0 = all checks passed, 1 = failures.
+ */
+
+#define SHPREFLIGHT_NO_MAIN 1
+#include "shpreflight.cpp"
+
+#if defined(_WIN32)
+#  include <direct.h>
+#  define MKDIR(p) _mkdir(p)
+#  define RMDIR(p) _rmdir(p)
+#else
+#  include <sys/stat.h>
+#  include <sys/types.h>
+#  include <unistd.h>
+#  define MKDIR(p) mkdir(p, 0777)
+#  define RMDIR(p) rmdir(p)
+#endif
+
+#include <cstdio>
+#include <cstring>
+
+static int checks = 0;
+static int failures = 0;
+
+#define CHECK(cond, msg)                                                 \
+    do {                                                                 \
+        checks++;                                                        \
+        if (!(cond)) {                                                   \
+            failures++;                                                  \
+            std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, (msg));  \
+        }                                                                \
+    } while (0)
+
+/* ---------- helpers ---------- */
+
+static bool has_code(const Report& r, const char* code)
+{
+    for (const Issue& iss : r.issues)
+        if (cstr_eq(iss.code, code))
+            return true;
+    return false;
+}
+
+static const Issue* find_code(const Report& r, const char* code)
+{
+    for (const Issue& iss : r.issues)
+        if (cstr_eq(iss.code, code))
+            return &iss;
+    return nullptr;
+}
+
+/* run preflight with PATH resolution disabled (deterministic) */
+static bool check_code(std::string_view cmd, const char* target, const char* code)
+{
+    Report r;
+    std::string err;
+    if (!preflight(std::string(cmd), target, false, r, err))
+        return false;
+    return has_code(r, code);
+}
+
+static std::vector<Segment> segs_of(std::string_view cmd)
+{
+    std::vector<Token> toks = lex(cmd);
+    return split_segments(toks);
+}
+
+/* ---------- lexer ---------- */
+
+static void test_lexer_reconstruct()
+{
+    const char* cmds[] = {
+        "", "ls", "rm -rf /", "a && b || c ; d",
+        "echo 'x y' \"z\" `w`", "  spaced   out  ",
+        "2>/dev/null", "echo 'unclosed", "a\tb\nc",
+        "x>>f", "a|b", "'q'", "2>&1"
+    };
+    for (size_t c = 0; c < sizeof cmds / sizeof cmds[0]; c++) {
+        std::vector<Token> t = lex(cmds[c]);
+        CHECK(reconstruct_eq(t, cmds[c]), "reconstruct(lex(cmd)) != cmd");
+        for (const Token& tok : t)
+            CHECK(tok.text.size() > 0, "token text must never be empty");
+    }
+}
+
+static void test_word_split()
+{
+    std::vector<Token> t = lex("rm -rf /");
+    CHECK(t.size() == 5, "expected 5 tokens for 'rm -rf /'");
+    if (t.size() == 5) {
+        CHECK(t[0].kind == TOK_WORD && t[0].text == "rm", "tok0");
+        CHECK(t[1].kind == TOK_SEP && t[1].text == " ", "tok1");
+        CHECK(t[2].kind == TOK_WORD && t[2].text == "-rf", "tok2");
+        CHECK(t[3].kind == TOK_SEP, "tok3");
+        CHECK(t[4].kind == TOK_WORD && t[4].text == "/", "tok4");
+    }
+}
+
+static void test_operator_runs_merge()
+{
+    const char* cmd = "a && b >> c 2>&1";
+    std::vector<Token> t = lex(cmd);
+    bool has_and = false, has_append = false, has_dupfd = false;
+    for (const Token& tok : t) {
+        if (tok.kind == TOK_OP) {
+            if (tok.text == "&&")
+                has_and = true;
+            if (tok.text == ">>")
+                has_append = true;
+            if (tok.text == ">&")
+                has_dupfd = true;
+        }
+    }
+    CHECK(has_and && has_append && has_dupfd, "operator runs must merge into &&, >>, >&");
+    CHECK(reconstruct_eq(t, cmd), "operator merge must not lose bytes");
+}
+
+static void test_quoted_spans()
+{
+    std::vector<Token> t = lex("echo 'a b c' \"d\" `e`");
+    bool sq = false, dq = false, bt = false;
+    for (const Token& tok : t) {
+        if (tok.kind == TOK_SQUOTE && tok.text == "'a b c'")
+            sq = true;
+        if (tok.kind == TOK_DQUOTE && tok.text == "\"d\"")
+            dq = true;
+        if (tok.kind == TOK_BACKTICK && tok.text == "`e`")
+            bt = true;
+    }
+    CHECK(sq, "single-quoted span kept whole");
+    CHECK(dq, "double-quoted span kept whole");
+    CHECK(bt, "backtick span kept whole");
+}
+
+static void test_unclosed_quote_flagged()
+{
+    CHECK(check_code("echo 'oops", "bash", "UNCLOSED-QUOTE"), "unclosed quote must be flagged");
+}
+
+/* ---------- segments ---------- */
+
+static void test_pipeline_segments()
+{
+    std::vector<Segment> s = segs_of("rg pat | head -5 | wc -l");
+    CHECK(s.size() == 3, "pipeline must split into 3 segments");
+    if (s.size() == 3) {
+        CHECK(s[0].head == "rg", "head 0");
+        CHECK(s[1].head == "head", "head 1");
+        CHECK(s[2].head == "wc", "head 2");
+        CHECK(seg_pipes_out(s[0]) && seg_pipes_out(s[1]), "pipe terminators");
+        CHECK(!seg_pipes_out(s[2]) && !s[2].terminated, "last segment unterminated");
+    }
+}
+
+static void test_segments_own_their_words()
+{
+    std::vector<Segment> s = segs_of("rm -rf / && ls");
+    CHECK(s.size() == 2, "two segments");
+    if (s.size() == 2) {
+        CHECK(s[0].words.size() == 3 && s[0].words[0] == "rm" &&
+              s[0].words[1] == "-rf" && s[0].words[2] == "/",
+              "segment 0 words");
+        CHECK(s[1].words.size() == 1 && s[1].words[0] == "ls", "segment 1 words");
+    }
+}
+
+static void test_redirect_target_not_a_command()
+{
+    std::vector<Segment> s = segs_of("echo hi > out.txt 2> err.txt");
+    CHECK(s.size() == 1, "one segment");
+    if (s.size() == 1) {
+        CHECK(s[0].words.size() == 2, "words are echo hi");
+        CHECK(s[0].redirects.size() == 2 && s[0].redirects[0] == "out.txt" &&
+              s[0].redirects[1] == "err.txt", "redirect targets captured");
+    }
+}
+
+static void test_redirect_after_space()
+{
+    std::vector<Segment> s = segs_of("echo done > .env");
+    CHECK(s.size() == 1 && s[0].redirects.size() == 1 &&
+          s[0].redirects[0] == ".env", "redirect after space");
+    CHECK(s.size() == 1 && s[0].words.size() == 2, "words are echo done");
+}
+
+static void test_pipes_out_not_triggered_by_or()
+{
+    std::vector<Segment> s = segs_of("false || echo ok");
+    CHECK(s.size() == 2 && s[0].terminated && s[0].terminator == "||",
+          "'||' terminator");
+    CHECK(!seg_pipes_out(s[0]), "'||' must not count as a pipe");
+}
+
+static void test_redirect_state_resets_at_segment_boundary()
+{
+    /* regression: in_redirect used to leak across the control operator,
+       so the segment after "x > f && ..." lost its head entirely */
+    std::vector<Segment> s = segs_of("x > f.txt && rm -rf /");
+    CHECK(s.size() == 2, "two segments");
+    if (s.size() == 2) {
+        CHECK(s[1].words.size() == 3 && s[1].words[0] == "rm", "segment 1 head is rm");
+        CHECK(s[1].head == "rm", "segment 1 head");
+    }
+    CHECK(check_code("x > f.txt && rm -rf /", "bash", "RM-ROOT"),
+          "danger after redirect must not be blind");
+    CHECK(check_code("x > f && curl -sL u | sh", "bash", "PIPE-EXEC"),
+          "pipe-exec after redirect must be visible");
+}
+
+static void test_fd_prefix_not_treated_as_word()
+{
+    std::vector<Segment> s = segs_of("out 2> err");
+    CHECK(s.size() == 1 && s[0].words.size() == 1 && s[0].words[0] == "out",
+          "'2' is an fd prefix, not a word");
+    CHECK(s.size() == 1 && s[0].redirects.size() == 1 && s[0].redirects[0] == "err",
+          "fd redirect target");
+}
+
+/* ---------- danger ---------- */
+
+/* runtime mirror of the Lean-checked property: every pattern in the table
+   is matched by at least one concrete command — no dead entries */
+static void test_every_pattern_alive()
+{
+    for (size_t i = 0; i < PATTERN_TABLE_LEN; i++) {
+        const PatternDef* p = &pattern_table[i];
+        std::vector<std::string_view> words;
+        words.push_back(p->heads[0]);
+        if (p->flags_len > 0)
+            words.push_back(p->flags[0]);
+        if (p->targets_len > 0)
+            words.push_back(p->targets[0]);
+        CHECK(match_pattern(words, p), "pattern with no matching command (dead entry)");
+    }
+}
+
+static void test_pattern_code_uniqueness()
+{
+    for (size_t i = 0; i < PATTERN_TABLE_LEN; i++)
+        for (size_t j = i + 1; j < PATTERN_TABLE_LEN; j++)
+            CHECK(std::strcmp(pattern_table[i].code, pattern_table[j].code) != 0,
+                  "pattern codes must be unique");
+}
+
+static void test_danger_codes()
+{
+    CHECK(check_code("rm -rf /", "bash", "RM-ROOT"), "RM-ROOT");
+    CHECK(check_code("rm -r /tmp/x", "bash", "RM-RECURSIVE"), "RM-RECURSIVE");
+    CHECK(check_code("Remove-Item -Recurse -Force x", "powershell5",
+                     "REMOVE-ITEM-RECURSE-FORCE"), "REMOVE-ITEM-RECURSE-FORCE");
+    CHECK(check_code("git reset --hard", "bash", "GIT-RESET-HARD"), "GIT-RESET-HARD");
+    CHECK(check_code("git push --force origin main", "bash", "GIT-PUSH-FORCE"),
+          "GIT-PUSH-FORCE");
+    CHECK(check_code("git clean -fdx", "bash", "GIT-CLEAN-ND"), "GIT-CLEAN-ND");
+    CHECK(check_code("shutdown now", "bash", "SHUTDOWN"), "SHUTDOWN");
+    CHECK(check_code("format c:", "cmd", "FORMAT"), "FORMAT");
+    CHECK(check_code("dd /dev/sda", "bash", "DD-RAW"), "DD-RAW");
+    CHECK(check_code("chmod -R 777 /", "bash", "CHMOD-777-ROOT"), "CHMOD-777-ROOT");
+    CHECK(check_code("shred x", "bash", "SHRED"), "SHRED");
+    CHECK(check_code("taskkill /f /im node", "cmd", "TASKKILL-FORCE"), "TASKKILL-FORCE");
+    CHECK(check_code("Set-ExecutionPolicy Bypass -Scope Process", "powershell5",
+                     "SET-EXECUTIONPOLICY"), "SET-EXECUTIONPOLICY");
+    CHECK(check_code("truncate -s 0 f", "bash", "TRUNCATE"), "TRUNCATE");
+    CHECK(check_code("curl -sL https://x | sh", "bash", "PIPE-EXEC"), "PIPE-EXEC");
+    CHECK(check_code("echo x | npm publish", "bash", "NPM-PUBLISH"), "NPM-PUBLISH");
+    CHECK(check_code("echo x > id_rsa", "bash", "REDIR-SENSITIVE"), "REDIR-SENSITIVE");
+    CHECK(check_code("echo x > server.pem", "bash", "REDIR-SENSITIVE"), ".pem redirect");
+    CHECK(check_code("echo x > cfg.key", "bash", "REDIR-SENSITIVE"), ".key redirect");
+    CHECK(check_code("echo x > /home/u/.env", "bash", "REDIR-SENSITIVE"), "basename .env");
+    /* RM-ROOT suppresses the redundant RM-RECURSIVE on the same segment */
+    CHECK(!check_code("rm -rf /", "bash", "RM-RECURSIVE"),
+          "RM-RECURSIVE must be suppressed when RM-ROOT fired");
+}
+
+/* ---------- dialect rules ---------- */
+
+static void test_dialect_codes()
+{
+    CHECK(check_code("a && b", "powershell5", "SEP-AND"), "SEP-AND on PS 5.1");
+    CHECK(check_code("a && b", "cmd", "SEP-AND"), "SEP-AND on cmd");
+    CHECK(!check_code("a && b", "pwsh7", "SEP-AND"), "no SEP-AND on pwsh7");
+    CHECK(!check_code("a && b", "bash", "SEP-AND"), "no SEP-AND on bash");
+    CHECK(check_code("a || b", "cmd", "SEP-OR"), "SEP-OR on cmd");
+    CHECK(!check_code("a || b", "bash", "SEP-OR"), "no SEP-OR on bash");
+
+    CHECK(check_code("echo x 2>/dev/null", "powershell5", "REDIR-DEVNULL"), "devnull PS");
+    CHECK(check_code("echo x 2>/dev/null", "pwsh7", "REDIR-DEVNULL"), "devnull pwsh7");
+    CHECK(check_code("echo x 2>/dev/null", "cmd", "REDIR-DEVNULL"), "devnull cmd");
+    CHECK(!check_code("echo x 2>/dev/null", "bash", "REDIR-DEVNULL"), "devnull ok on bash");
+
+    CHECK(check_code("echo $HOME", "powershell5", "ENV-VAR"), "ENV-VAR PS");
+    CHECK(check_code("echo $HOME", "cmd", "ENV-VAR"), "ENV-VAR cmd");
+    CHECK(!check_code("echo $HOME", "bash", "ENV-VAR"), "no ENV-VAR on bash");
+    CHECK(check_code("echo ${HOME}", "powershell5", "BRACE-VAR"), "BRACE-VAR");
+    CHECK(check_code("echo $?", "powershell5", "SPECIAL-VAR"), "SPECIAL-VAR");
+    CHECK(check_code("export FOO=bar", "powershell5", "EXPORT"), "EXPORT PS");
+    CHECK(check_code("export FOO=bar", "cmd", "EXPORT"), "EXPORT cmd");
+    CHECK(!check_code("export FOO=bar", "bash", "EXPORT"), "no EXPORT on bash");
+    CHECK(check_code("source ./env", "powershell5", "SOURCE"), "SOURCE");
+    CHECK(check_code("echo `uname`", "powershell5", "BACKTICK"), "BACKTICK PS");
+    CHECK(check_code("echo `uname`", "cmd", "BACKTICK"), "BACKTICK cmd");
+    CHECK(!check_code("echo `uname`", "bash", "BACKTICK"), "no BACKTICK on bash");
+    CHECK(check_code("curl -sL u", "powershell5", "CURL-ALIAS"), "CURL-ALIAS");
+    CHECK(check_code("rm -r x", "powershell5", "RM-FLAGS"), "RM-FLAGS");
+    CHECK(check_code("Get-ChildItem -Recurse", "bash", "CMDLET-IN-POSIX"), "CMDLET-IN-POSIX");
+    CHECK(!check_code("Get-ChildItem -Recurse", "powershell5", "CMDLET-IN-POSIX"),
+          "cmdlet is native on PowerShell");
+    CHECK(check_code("grep pat f", "powershell5", "POSIX-CMD"), "POSIX-CMD");
+}
+
+/* ---------- tools (controlled PATH) ---------- */
+
+static const char* PATHBIN = "test_pathbin";
+
+static void set_path_env(const char* dir)
+{
+#if defined(_WIN32)
+    _putenv_s("PATH", dir);
+#else
+    setenv("PATH", dir, 1);
+#endif
+    shp_tools_reset();
+}
+
+static void restore_path_env(const char* old)
+{
+    if (old)
+        set_path_env(old);
+    shp_tools_reset();
+}
+
+static void write_empty_file(const char* path)
+{
+    std::FILE* f = std::fopen(path, "wb");
+    if (f)
+        std::fclose(f);
+}
+
+static void test_tools_resolution()
+{
+    const char* old = std::getenv("PATH");
+    MKDIR(PATHBIN);
+#if defined(_WIN32)
+    write_empty_file("test_pathbin/fakecmd-xyz.exe");
+    write_empty_file("test_pathbin/grep.exe");
+#else
+    write_empty_file("test_pathbin/fakecmd-xyz");
+    write_empty_file("test_pathbin/grep");
+#endif
+    set_path_env(PATHBIN);
+
+    Report r;
+    std::string err;
+
+    r = Report();
+    CHECK(preflight("fakecmd-xyz --v", "bash", true, r, err), "preflight ok");
+    CHECK(r.tools.size() == 1 && r.tools[0].name == "fakecmd-xyz" &&
+          cstr_eq(r.tools[0].status, "found") && r.tools[0].path.has_value(),
+          "tool found on controlled PATH");
+
+    r = Report();
+    CHECK(preflight("no-such-cmd-xyz --v", "bash", true, r, err), "preflight ok");
+    CHECK(r.tools.size() == 1 && cstr_eq(r.tools[0].status, "missing") &&
+          !r.tools[0].path.has_value(), "missing tool reported");
+    CHECK(has_code(r, "TOOL-NOT-FOUND"), "TOOL-NOT-FOUND issue for missing head");
+
+    r = Report();
+    CHECK(preflight("mkdir newdir", "cmd", true, r, err), "preflight ok");
+    CHECK(r.tools.empty(), "builtin heads are not resolved on PATH");
+
+    r = Report();
+    CHECK(preflight("foo --v | foo --v | foo", "bash", true, r, err), "preflight ok");
+    CHECK(r.tools.size() == 1 && r.tools[0].name == "foo",
+          "duplicate heads resolved once");
+
+    /* POSIX-CMD downgrades to info when the tool is actually on PATH */
+    r = Report();
+    CHECK(preflight("grep pat f", "powershell5", true, r, err), "preflight ok");
+    const Issue* pc = find_code(r, "POSIX-CMD");
+    CHECK(pc != nullptr, "POSIX-CMD present");
+    CHECK(pc && cstr_eq(pc->severity, "info"),
+          "POSIX-CMD downgrades to info when found on PATH");
+    CHECK(!has_code(r, "TOOL-NOT-FOUND"), "no TOOL-NOT-FOUND when POSIX-CMD already covers it");
+
+    /* no-path-check skips resolution entirely */
+    r = Report();
+    CHECK(preflight("no-such-cmd-xyz --v", "bash", false, r, err), "preflight ok");
+    CHECK(r.tools.empty(), "--no-path-check yields no tools");
+
+    /* 'find' keeps its hard failure even when present on PATH */
+#if defined(_WIN32)
+    write_empty_file("test_pathbin/find.exe");
+#else
+    write_empty_file("test_pathbin/find");
+#endif
+    shp_tools_reset();
+    r = Report();
+    CHECK(preflight("find . -name x", "powershell5", true, r, err), "preflight ok");
+    const Issue* fi = find_code(r, "POSIX-CMD");
+    CHECK(fi && cstr_eq(fi->severity, "error"),
+          "'find' is never downgraded (Windows namesake differs)");
+
+    restore_path_env(old);
+#if defined(_WIN32)
+    std::remove("test_pathbin/find.exe");
+    std::remove("test_pathbin/fakecmd-xyz.exe");
+    std::remove("test_pathbin/grep.exe");
+#else
+    std::remove("test_pathbin/find");
+    std::remove("test_pathbin/fakecmd-xyz");
+    std::remove("test_pathbin/grep");
+#endif
+    RMDIR(PATHBIN);
+}
+
+static void test_builtins_sorted()
+{
+    for (size_t i = 0; i + 1 < BUILTINS_LEN; i++)
+        CHECK(std::strcmp(builtins[i], builtins[i + 1]) < 0,
+              "builtins table must stay sorted for bsearch");
+    for (size_t i = 0; i < BUILTINS_LEN; i++)
+        CHECK(is_builtin(builtins[i]), "bsearch must find every builtin");
+    CHECK(!is_builtin("not-a-builtin"), "bsearch must reject unknown names");
+}
+
+/* ---------- report ---------- */
+
+static void test_verdicts_and_exit_codes()
+{
+    struct {
+        const char* cmd;
+        const char* verdict;
+        int exit_code;
+    } cases[] = {
+        { "ls", "ok", 0 },
+        { "git clean -fd", "warn", 1 },
+        { "rm -rf /", "fail", 2 },
+    };
+    for (size_t c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+        Report r;
+        std::string err;
+        CHECK(preflight(cases[c].cmd, "bash", false, r, err), "preflight ok");
+        CHECK(cstr_eq(r.verdict, cases[c].verdict), "verdict");
+        CHECK(report_exit_code(r) == cases[c].exit_code, "exit code");
+    }
+}
+
+static void test_json_shape()
+{
+    Report r;
+    std::string err;
+    CHECK(preflight("rm -rf /", "bash", false, r, err), "preflight ok");
+    std::string b;
+    report_to_json(r, b);
+    CHECK(!b.empty(), "json rendered");
+    CHECK(std::strstr(b.c_str(), "\"verdict\": \"fail\"") != nullptr, "verdict in json");
+    CHECK(std::strstr(b.c_str(), "\"target\": \"bash\"") != nullptr, "target in json");
+    CHECK(std::strstr(b.c_str(), "\"errors\": 1,") != nullptr, "errors count in json");
+    CHECK(std::strstr(b.c_str(), "\"code\": \"RM-ROOT\"") != nullptr, "issue code in json");
+    CHECK(std::strstr(b.c_str(), "\"fix\":") != nullptr, "fix present in json");
+    CHECK(std::strstr(b.c_str(), "\"elapsed_ms\":") != nullptr, "elapsed in json");
+    CHECK(std::strstr(b.c_str(), "\"tools\": []") != nullptr, "empty tools render as []");
+
+    /* empty-issues report must not render null lists */
+    r = Report();
+    CHECK(preflight("ls", "bash", false, r, err), "preflight ok");
+    b.clear();
+    report_to_json(r, b);
+    CHECK(std::strstr(b.c_str(), "\"issues\": []") != nullptr, "empty issues render as []");
+    CHECK(std::strstr(b.c_str(), "null") == nullptr, "no null lists in json");
+}
+
+static void test_text_output()
+{
+    Report r;
+    std::string err;
+    CHECK(preflight("a && b", "powershell5", false, r, err), "preflight ok");
+    std::string b;
+    report_to_text(r, b);
+    CHECK(std::strstr(b.c_str(),
+                      "shpreflight: fail (1 error(s), 0 warning(s)) for powershell5\n") != nullptr,
+          "text header");
+    CHECK(std::strstr(b.c_str(),
+                      "  SEP-AND [error] syntax: operator '&&' is not supported in this shell\n") != nullptr,
+          "issue line");
+    CHECK(std::strstr(b.c_str(),
+                      "    fix: separate commands, or chain with ';' if order alone matters\n") != nullptr,
+          "fix line");
+
+    r = Report();
+    CHECK(preflight("ls", "bash", false, r, err), "preflight ok");
+    b.clear();
+    report_to_text(r, b);
+    CHECK(std::strstr(b.c_str(), "  no issues found\n") != nullptr, "no-issues line");
+}
+
+/* ---------- shells registry ---------- */
+
+static void test_shell_registry()
+{
+    CHECK(SHELL_TABLE_LEN == 5, "five shells registered");
+    std::string t;
+    std::string err;
+    CHECK(resolve_target(nullptr, t, err), "NULL resolves");
+    CHECK(resolve_target("auto", t, err) && !t.empty(), "auto resolves");
+    CHECK(!resolve_target("fish", t, err) && !err.empty(), "unknown shell rejected");
+    CHECK(resolve_target("bash", t, err) && t == "bash", "bash resolves");
+    CHECK(resolve_target("pwsh7", t, err) && t == "pwsh7", "pwsh7 resolves");
+}
+
+static void test_shells_output()
+{
+    std::FILE* f = std::tmpfile();
+    CHECK(f != nullptr, "tmpfile for shells output");
+    if (!f)
+        return;
+    run_shells(f);
+    std::rewind(f);
+    char buf[4096];
+    size_t n = std::fread(buf, 1, sizeof buf - 1, f);
+    buf[n] = '\0';
+    std::fclose(f);
+    CHECK(std::strstr(buf, "\"powershell5\": \"Windows PowerShell 5.1 (powershell.exe)\"") != nullptr,
+          "powershell5 entry");
+    CHECK(std::strstr(buf, "\"sh\": \"POSIX sh\"") != nullptr, "sh entry");
+    CHECK(std::strstr(buf, "\"bash\": \"Bash (Git Bash / WSL / Unix)\"") != nullptr, "bash entry");
+    CHECK(std::strstr(buf, "\"cmd\": \"Windows cmd.exe\"") != nullptr, "cmd entry");
+    CHECK(std::strstr(buf, "\"pwsh7\": \"PowerShell 7+ (pwsh.exe)\"") != nullptr, "pwsh7 entry");
+}
+
+/* ---------- CLI argument parsing ---------- */
+
+static void test_parse_check_args()
+{
+    {
+        const char* argv1[] = { "ls", "-la" };
+        CheckArgs ca;
+        CHECK(parse_check_args(2, argv1, ca), "plain positionals");
+        CHECK(ca.pos.size() == 2 && ca.pos[0] == "ls", "positionals kept");
+        CHECK(ca.shell == "auto" && ca.format == "text", "defaults");
+    }
+    {
+        const char* argv2[] = { "--shell", "bash", "--format", "json", "cmd", "-rf" };
+        CheckArgs ca;
+        CHECK(parse_check_args(6, argv2, ca), "flags before positionals");
+        CHECK(ca.shell == "bash" && ca.format == "json", "flag values");
+        CHECK(ca.pos.size() == 2, "command words survive");
+    }
+    {
+        const char* argv3[] = { "--shell=cmd", "--format=json", "--stdin" };
+        CheckArgs ca;
+        CHECK(parse_check_args(3, argv3, ca), "equals-form flags");
+        CHECK(ca.shell == "cmd" && ca.use_stdin, "equals values");
+    }
+    {
+        /* command words that look like flags must stay positional */
+        const char* argv4[] = { "rm", "-rf", "--", "--not-a-flag", "x" };
+        CheckArgs ca;
+        CHECK(parse_check_args(5, argv4, ca), "double dash");
+        CHECK(ca.pos.size() == 4 && ca.pos[0] == "rm",
+              "everything is positional after --");
+    }
+    {
+        const char* argv5[] = { "--format", "bogus" };
+        CheckArgs ca;
+        CHECK(!parse_check_args(2, argv5, ca) && !ca.err.empty(), "format validated");
+    }
+    {
+        const char* argv6[] = { "--shell" };
+        CheckArgs ca;
+        CHECK(!parse_check_args(1, argv6, ca) && !ca.err.empty(), "--shell needs a value");
+    }
+    {
+        const char* argv7[] = { "--no-path-check", "x" };
+        CheckArgs ca;
+        CHECK(parse_check_args(2, argv7, ca) && ca.no_path_check, "no-path-check");
+    }
+}
+
+/* ---------- CLI end-to-end ---------- */
+
+static std::string slurp_tmpfile(std::FILE* f)
+{
+    std::string buf;
+    std::rewind(f);
+    char chunk[4096];
+    size_t n;
+    while ((n = std::fread(chunk, 1, sizeof chunk, f)) > 0)
+        buf.append(chunk, n);
+    std::fclose(f);
+    return buf;
+}
+
+static void test_cli_run()
+{
+    {
+        const char* argv[] = { "check", "--shell", "bash", "--format", "json",
+                               "--no-path-check", "rm", "-rf", "/" };
+        std::FILE* out = std::tmpfile();
+        int rc = run(9, argv, out, stderr);
+        CHECK(rc == 2, "failing command exits 2");
+        std::string s = slurp_tmpfile(out);
+        CHECK(std::strstr(s.c_str(), "\"verdict\": \"fail\"") != nullptr, "json verdict via CLI");
+        CHECK(std::strstr(s.c_str(), "\"code\": \"RM-ROOT\"") != nullptr, "RM-ROOT via CLI");
+    }
+    {
+        const char* argv[] = { "check", "--format=text", "--shell=bash",
+                               "--no-path-check", "a && b" };
+        std::FILE* out = std::tmpfile();
+        int rc = run(5, argv, out, stderr);
+        CHECK(rc == 0, "&& is fine on bash");
+        std::string s = slurp_tmpfile(out);
+        CHECK(std::strstr(s.c_str(), "shpreflight: ok") != nullptr, "text output via CLI");
+    }
+    {
+        const char* argv[] = { "check", "--shell", "powershell5", "a && b" };
+        std::FILE* out = std::tmpfile();
+        int rc = run(5, argv, out, stderr);
+        CHECK(rc == 2, "&& breaks powershell5");
+        std::string s = slurp_tmpfile(out);
+        CHECK(std::strstr(s.c_str(), "SEP-AND") != nullptr, "SEP-AND via CLI");
+    }
+    {
+        const char* argv[] = { "check" };
+        std::FILE* errf = std::tmpfile();
+        int rc = run(1, argv, std::tmpfile(), errf);
+        CHECK(rc == 3, "no command given exits 3");
+        std::string s = slurp_tmpfile(errf);
+        CHECK(std::strstr(s.c_str(), "error: no command given") != nullptr,
+              "no-command message");
+    }
+    {
+        const char* argv[] = { "check", "--shell", "fish", "ls" };
+        std::FILE* errf = std::tmpfile();
+        int rc = run(4, argv, std::tmpfile(), errf);
+        CHECK(rc == 3, "unknown shell exits 3");
+        std::string s = slurp_tmpfile(errf);
+        CHECK(std::strstr(s.c_str(), "unknown shell 'fish'") != nullptr,
+              "unknown shell message");
+    }
+    {
+        const char* argv[] = { "check", "--format", "bogus", "ls" };
+        std::FILE* errf = std::tmpfile();
+        int rc = run(4, argv, std::tmpfile(), errf);
+        CHECK(rc == 3, "bad format exits 3");
+    }
+    {
+        const char* argv[] = { "shells" };
+        std::FILE* out = std::tmpfile();
+        int rc = run(1, argv, out, stderr);
+        CHECK(rc == 0, "shells exits 0");
+        std::string s = slurp_tmpfile(out);
+        CHECK(std::strstr(s.c_str(), "\"powershell5\"") != nullptr &&
+              std::strstr(s.c_str(), "\"sh\"") != nullptr,
+              "shells listing via CLI");
+    }
+    {
+        const char* argv[] = { "--help" };
+        std::FILE* out = std::tmpfile();
+        int rc = run(1, argv, out, stderr);
+        CHECK(rc == 0, "help exits 0");
+        std::string s = slurp_tmpfile(out);
+        CHECK(std::strstr(s.c_str(), "usage: shpreflight <command> [options]") != nullptr,
+              "usage text");
+    }
+    {
+        const char* argv[] = { "bogus-subcommand" };
+        std::FILE* errf = std::tmpfile();
+        int rc = run(1, argv, std::tmpfile(), errf);
+        CHECK(rc == 3, "unknown subcommand exits 3");
+    }
+}
+
+/* ---------- main ---------- */
+
+int main()
+{
+    test_lexer_reconstruct();
+    test_word_split();
+    test_operator_runs_merge();
+    test_quoted_spans();
+    test_unclosed_quote_flagged();
+    test_pipeline_segments();
+    test_segments_own_their_words();
+    test_redirect_target_not_a_command();
+    test_redirect_after_space();
+    test_pipes_out_not_triggered_by_or();
+    test_redirect_state_resets_at_segment_boundary();
+    test_fd_prefix_not_treated_as_word();
+    test_every_pattern_alive();
+    test_pattern_code_uniqueness();
+    test_danger_codes();
+    test_dialect_codes();
+    test_tools_resolution();
+    test_builtins_sorted();
+    test_verdicts_and_exit_codes();
+    test_json_shape();
+    test_text_output();
+    test_shell_registry();
+    test_shells_output();
+    test_parse_check_args();
+    test_cli_run();
+
+    std::printf("%d checks, %d failures\n", checks, failures);
+    return failures == 0 ? 0 : 1;
+}

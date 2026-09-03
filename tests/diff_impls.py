@@ -1,4 +1,4 @@
-"""Cross-implementation consistency: Python vs Go vs C vs Rust.
+"""Cross-implementation consistency: Python vs Go vs C vs C++ vs Rust.
 
 Runs every port's CLI over a corpus of commands x shells with
 --no-path-check --format json and asserts the reports are identical apart
@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BINS = {
     "go": ROOT / "build" / "go" / "shpreflight.exe",
     "c": ROOT / "c" / "shpreflight.exe",
+    "cpp": ROOT / "cpp" / "shpreflight.exe",
     "rust": ROOT / "rs" / "target" / "release" / "shpreflight.exe",
 }
 

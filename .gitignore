@@ -7,4 +7,5 @@ dist/
 proofs/*.olean
 proofs/_axioms.lean
 c/*.exe
+cpp/*.exe
 rs/target/

@@ -1,8 +1,8 @@
-"""Export the Python danger pattern table to Lean 4, Go, C and Rust source files.
+"""Export the Python danger pattern table to Lean 4, Go, C, C++ and Rust source files.
 
 The Lean proofs (Shpreflight.lean) are checked against the generated
-Patterns.lean, and the Go, C and Rust implementations consume the same
-exported table, so all five implementations share one machine-checked
+Patterns.lean, and the Go, C, C++ and Rust implementations consume the same
+exported table, so all six implementations share one machine-checked
 source of truth: every regeneration re-links proof and every port to the
 runtime table.
 
@@ -11,6 +11,7 @@ Writes:
     proofs/Patterns.lean
     internal/danger/patterns_gen.go
     c/patterns_gen.h
+    cpp/patterns_gen.h
     rs/src/patterns_gen.rs
 """
 
@@ -214,6 +215,7 @@ def main() -> int:
         (ROOT / "proofs" / "Patterns.lean", render_lean()),
         (ROOT / "internal" / "danger" / "patterns_gen.go", render_go()),
         (ROOT / "c" / "patterns_gen.h", render_c()),
+        (ROOT / "cpp" / "patterns_gen.h", render_c()),
         (ROOT / "rs" / "src" / "patterns_gen.rs", render_rust()),
     ]
     for path, text in outs:
