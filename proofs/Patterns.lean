@@ -13,14 +13,14 @@ structure Pattern where
 def patterns : List Pattern :=
   [
     ⟨"RM-ROOT", ["rm"], ["-R", "-RF", "-Rf", "-f", "-fr", "-r", "-rf"], ["$HOME", "$HOME/", "$PWD", "%SYSTEMROOT%", "*", ".", "..", "/", "/*", "C:/", "C:\\", "C:\\Windows", "~", "~/*"]⟩,
-    ⟨"RM-RECURSIVE", ["rm"], ["-R", "-Rf", "-fr", "-r", "-rf"], []⟩,
+    ⟨"RM-RECURSIVE", ["rm"], ["-R", "-RF", "-Rf", "-fr", "-r", "-rf"], []⟩,
     ⟨"REMOVE-ITEM-RECURSE-FORCE", ["Remove-Item", "del", "erase", "rd", "ri"], ["-Force", "-Recurse", "/f", "/q", "/s"], []⟩,
     ⟨"GIT-RESET-HARD", ["git"], ["--hard"], []⟩,
     ⟨"GIT-PUSH-FORCE", ["git"], ["--force", "--force-with-lease", "-f"], []⟩,
     ⟨"GIT-CLEAN-ND", ["git"], ["-X", "-d", "-f", "-fd", "-fdx", "-x", "clean"], []⟩,
     ⟨"SHUTDOWN", ["halt", "poweroff", "reboot", "restart", "shutdown"], [], []⟩,
     ⟨"FORMAT", ["format", "mkfs", "mkfs.ext4", "mkfs.vfat"], [], []⟩,
-    ⟨"DD-RAW", ["dd"], [], ["/dev/hda", "/dev/nvme0n1", "/dev/sda", "/dev/sdb"]⟩,
+    ⟨"DD-RAW", ["dd"], [], ["/dev/disk0", "/dev/hda", "/dev/hdb", "/dev/mmcblk0", "/dev/nvme0n1", "/dev/nvme0n2", "/dev/nvme1n1", "/dev/nvme1n2", "/dev/rdisk0", "/dev/sda", "/dev/sdb", "/dev/sdc", "/dev/sdd", "/dev/sde", "/dev/sdf", "/dev/sdg", "/dev/sdh", "/dev/sdi", "/dev/sdj", "/dev/sdk", "/dev/sdl", "/dev/sdm", "/dev/sdn", "/dev/sdo", "/dev/sdp", "/dev/vda", "/dev/vdb", "/dev/vdc", "/dev/xvda", "/dev/xvdb", "\\\\.\\PhysicalDrive0", "\\\\.\\PhysicalDrive1", "of=/dev/disk0", "of=/dev/hda", "of=/dev/hdb", "of=/dev/mmcblk0", "of=/dev/nvme0n1", "of=/dev/nvme0n2", "of=/dev/nvme1n1", "of=/dev/nvme1n2", "of=/dev/rdisk0", "of=/dev/sda", "of=/dev/sdb", "of=/dev/sdc", "of=/dev/sdd", "of=/dev/sde", "of=/dev/sdf", "of=/dev/sdg", "of=/dev/sdh", "of=/dev/sdi", "of=/dev/sdj", "of=/dev/sdk", "of=/dev/sdl", "of=/dev/sdm", "of=/dev/sdn", "of=/dev/sdo", "of=/dev/sdp", "of=/dev/vda", "of=/dev/vdb", "of=/dev/vdc", "of=/dev/xvda", "of=/dev/xvdb", "of=\\\\.\\PhysicalDrive0", "of=\\\\.\\PhysicalDrive1"]⟩,
     ⟨"CHMOD-777-ROOT", ["chmod"], [], ["$HOME", "*", "/", "/*", "~", "~/*"]⟩,
     ⟨"SHRED", ["shred", "srm"], [], []⟩,
     ⟨"TASKKILL-FORCE", ["taskkill"], ["-f", "/f"], []⟩,

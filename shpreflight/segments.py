@@ -47,12 +47,17 @@ def split_segments(tokens: list[tuple[str, str]]) -> list[Segment]:
     in_redirect = False
 
     def flush(terminator: str | None = None) -> None:
+        nonlocal in_redirect
         if words or redirects or raw_parts:
             segments.append(Segment(list(words), list(redirects),
                                     "".join(raw_parts).strip(), terminator))
         words.clear()
         redirects.clear()
         raw_parts.clear()
+        # redirect state is per-segment: without this reset, every word after
+        # "x > f && ..." would be swallowed as a redirect target and the head
+        # of the next segment (e.g. an "rm -rf /") would vanish from analysis
+        in_redirect = False
 
     for idx, (kind, text) in enumerate(tokens):
         if kind == SEP:

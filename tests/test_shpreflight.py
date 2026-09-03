@@ -78,6 +78,13 @@ class TestSegments:
         assert segs[0].terminator == "||"
         assert not segs[0].pipes_out
 
+    def test_redirect_state_resets_at_segment_boundary(self):
+        # regression: in_redirect used to leak across the control operator,
+        # so the segment after "x > f && ..." lost its head entirely
+        segs = split_segments(lex("x > f.txt && rm -rf /"))
+        assert segs[1].words == ["rm", "-rf", "/"]
+        assert segs[1].head == "rm"
+
 
 class TestDialectRules:
     def test_and_fails_on_ps5_and_cmd(self):
@@ -143,6 +150,12 @@ class TestDanger:
         issues = [i.code for i in preflight("rm -rf /", target="bash").issues]
         assert issues.count("RM-RECURSIVE") == 0 or "RM-ROOT" not in issues
 
+    def test_danger_after_redirect_not_blind(self):
+        # the blind-spot the per-segment redirect reset protects: before the
+        # fix, both segments below lost their heads to in_redirect leakage
+        assert "RM-ROOT" in codes("x > f.txt && rm -rf /", target="bash")
+        assert "PIPE-EXEC" in codes("x > f && curl -sL u | sh", target="bash")
+
     def test_git_reset_hard(self):
         assert "GIT-RESET-HARD" in codes("git reset --hard HEAD~3", target="bash")
 
@@ -176,6 +189,22 @@ class TestDanger:
                 if p.targets:
                     words.append(next(iter(p.targets)))
                 assert match_pattern(words, p), p.code
+
+    def test_dd_raw_covers_common_devices(self):
+        # one device per family: SATA beyond sda/sdb, virtio (cloud VMs),
+        # legacy IDE, Xen/AWS, NVMe partitions, SD/eMMC, macOS, Windows.
+        # of= is the form real dd invocations use; bare is the legacy form.
+        for dev in ["/dev/sdc", "/dev/sdp", "/dev/vda", "/dev/vdb",
+                    "/dev/hdb", "/dev/xvda", "/dev/nvme1n1", "/dev/mmcblk0",
+                    "/dev/disk0", "/dev/rdisk0", r"\\.\PhysicalDrive0"]:
+            assert "DD-RAW" in codes(f"dd if=img.iso of={dev}", target="bash"), dev
+        assert "DD-RAW" in codes("dd /dev/sdc", target="bash")
+
+    def test_dd_raw_not_on_file_targets(self):
+        assert "DD-RAW" not in codes("dd if=a of=b.img", target="bash")
+
+    def test_rm_recursive_matches_uppercase_RF(self):
+        assert "RM-RECURSIVE" in codes("rm -RF build", target="bash")
 
 
 class TestTools:

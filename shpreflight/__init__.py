@@ -5,4 +5,4 @@ from .lex import lex, reconstruct
 from .report import Issue, Report
 
 __all__ = ["preflight", "lex", "reconstruct", "Issue", "Report"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

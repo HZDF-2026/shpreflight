@@ -22,6 +22,24 @@ _RM_DELETE_FLAGS = frozenset({"-rf", "-fr", "-Rf", "-RF", "-r", "-f", "-R"})
 _ROOTISH = frozenset({"/", "/*", "~", "~/*", "*", ".", "..", "$HOME", "$HOME/",
                       "$PWD", "C:\\", "C:/", "C:\\Windows", "%SYSTEMROOT%"})
 
+# Raw block devices a `dd of=` can overwrite. Matching is exact-string, so the
+# table enumerates concrete device names per family: sd[a-p] (SATA/SCSI/USB),
+# vd[a-c] (virtio, common on cloud VMs), hd[a-b] (legacy IDE), xvda/xvdb
+# (Xen/AWS), nvme[01]n[12] (NVMe), mmcblk0 (SD/eMMC, e.g. Raspberry Pi),
+# disk0/rdisk0 (macOS), PhysicalDrive[01] (Windows). Each is listed both bare
+# (dd /dev/sda) and with the of= key (dd of=/dev/sda), the form real dd
+# invocations use.
+_RAW_DEVICES = (
+    frozenset(f"/dev/sd{c}" for c in "abcdefghijklmnop")
+    | frozenset(f"/dev/vd{c}" for c in "abc")
+    | frozenset(f"/dev/hd{c}" for c in "ab")
+    | frozenset({"/dev/xvda", "/dev/xvdb",
+                 "/dev/nvme0n1", "/dev/nvme0n2", "/dev/nvme1n1", "/dev/nvme1n2",
+                 "/dev/mmcblk0", "/dev/disk0", "/dev/rdisk0",
+                 r"\\.\PhysicalDrive0", r"\\.\PhysicalDrive1"})
+)
+_DD_RAW_TARGETS = _RAW_DEVICES | {f"of={d}" for d in _RAW_DEVICES}
+
 _SENSITIVE_BASES = frozenset({".env", ".env.local", ".env.production", "secrets",
                               "id_rsa", "id_ed25519", "credentials", "credentials.json",
                               ".npmrc", ".netrc", ".aws/credentials"})
@@ -49,7 +67,7 @@ PATTERNS = (
         fix="restrict the target path; verify with --dry-run or -WhatIf"),
     DangerPattern(
         "RM-RECURSIVE", "warning", _DELETE,
-        flags=frozenset({"-r", "-R", "-rf", "-fr", "-Rf", "-rf"}),
+        flags=frozenset({"-r", "-R", "-rf", "-fr", "-Rf", "-RF"}),
         message="recursive delete — irreversible without a trash can",
         fix="list the target first, or use a git-tracked directory"),
     DangerPattern(
@@ -82,8 +100,7 @@ PATTERNS = (
         message="filesystem format destroys all data on the volume",
         fix="never run this from an agent without explicit user confirmation"),
     DangerPattern(
-        "DD-RAW", "error", ("dd",), targets=frozenset({"/dev/sda", "/dev/sdb",
-                                                        "/dev/nvme0n1", "/dev/hda"}),
+        "DD-RAW", "error", ("dd",), targets=_DD_RAW_TARGETS,
         message="dd targeting a raw device overwrites the disk",
         fix="verify of= points at a file, not a device"),
     DangerPattern(
