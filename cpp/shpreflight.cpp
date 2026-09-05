@@ -46,6 +46,7 @@
 #endif
 
 #include "patterns_gen.h"
+#include <utility>
 
 /* ================= small string helpers ================= */
 
