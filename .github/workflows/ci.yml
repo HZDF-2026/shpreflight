@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install pytest
+        run: pip install pytest
+      - name: Unit tests
+        run: python -m pytest tests -q
+        env:
+          PYTHONUTF8: "1"
+
+  go:
+    name: Go ${{ matrix.go }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        go: ["1.21", stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - name: Unit tests
+        run: go test ./...
+
+  c:
+    name: C (${{ matrix.cc }}) on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: cc
+            mk: make
+          - os: macos-latest
+            cc: clang
+            mk: make
+          - os: windows-latest
+            cc: gcc
+            mk: mingw32-make
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW
+        if: runner.os == 'Windows'
+        run: choco install -y mingw
+      - name: Golden-table tests
+        run: ${{ matrix.mk }} -C c CC=${{ matrix.cc }} test
+
+  cpp:
+    name: C++ ${{ matrix.cc }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: g++
+            mk: make
+          - os: macos-latest
+            cc: clang++
+            mk: make
+          - os: windows-latest
+            cc: g++
+            mk: mingw32-make
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW
+        if: runner.os == 'Windows'
+        run: choco install -y mingw
+      - name: Golden-table tests
+        run: ${{ matrix.mk }} -C cpp CXX=${{ matrix.cc }} test
+
+  rust:
+    name: Rust on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Unit tests
+        run: cargo test --manifest-path rs/Cargo.toml
+
+  diff:
+    name: Differential (Python vs Go vs C vs C++ vs Rust)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install MinGW
+        run: choco install -y mingw
+      - name: Install pytest
+        run: pip install pytest
+      - name: Build Go binary
+        run: go build -o build/go/shpreflight.exe ./cmd/shpreflight
+      - name: Build C binary
+        run: mingw32-make -C c CC=gcc
+      - name: Build C++ binary
+        run: mingw32-make -C cpp CXX=g++
+      - name: Build Rust binary
+        run: cargo build --release --manifest-path rs/Cargo.toml
+      - name: Differential harness (all five implementations)
+        run: python -m pytest tests/diff_impls.py -v
+        env:
+          PYTHONUTF8: "1"
+
+  lean:
+    name: Lean 4 proofs (standalone)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install elan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain 4.21.0
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Pattern table is in sync with the Python source
+        run: |
+          cd proofs
+          python export_patterns.py
+          cd ..
+          git diff --exit-code proofs/Patterns.lean
+      - name: Verify proofs (no errors, no sorry)
+        run: |
+          export LEAN_PATH="$(lean --print-prefix)/lib/lean:."
+          cd proofs
+          status=0
+          for f in Patterns.lean Shpreflight.lean; do
+            out=$(lean "$f" -o "${f%.lean}.olean" 2>&1) || status=1
+            errors=$(printf '%s\n' "$out" | grep -c ': error' || true)
+            sorries=$(printf '%s\n' "$out" | grep -c "uses 'sorry'" || true)
+            echo "$f: errors=$errors sorry=$sorries"
+            printf '%s\n' "$out" | grep ': error' || true
+            [ "$errors" -eq 0 ] && [ "$sorries" -eq 0 ] || status=1
+          done
+          exit $status
